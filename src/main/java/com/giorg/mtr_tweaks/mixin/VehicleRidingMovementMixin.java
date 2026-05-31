@@ -217,5 +217,32 @@ public abstract class VehicleRidingMovementMixin {
             }
         } catch (Exception e) {}
     }
+
+    /**
+     * MTR forces the player's Y position to match the floor's exact Y level (usually 0.0).
+     * In Vivecraft, the entity's Y position represents the HMD (head). Forcing it to 0.0 crushes the player into the floor.
+     * We intercept clampPosition to preserve the player's true relative Y coordinate instead of the floor's Y.
+     */
+    @Inject(method = "clampPosition", at = @At("TAIL"), remap = false)
+    private static void mtrTweaks_clampPositionFix(
+            org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList floorsAndDoorways,
+            double x, double z,
+            org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList offsets,
+            CallbackInfo ci) {
+        if (!VIVECRAFT_PRESENT) return;
+        if (!offsets.isEmpty()) {
+            try {
+                java.lang.reflect.Field field = org.mtr.mod.client.VehicleRidingMovement.class.getDeclaredField("ridingVehicleY");
+                field.setAccessible(true);
+                double currentY = (Double) field.get(null);
+                
+                org.mtr.mapping.holder.Vector3d lastOffset = (org.mtr.mapping.holder.Vector3d) offsets.get(offsets.size() - 1);
+                
+                // Replace the floor's Y offset (0.0) with the player's actual HMD Y offset
+                org.mtr.mapping.holder.Vector3d newOffset = new org.mtr.mapping.holder.Vector3d(lastOffset.getXMapped(), currentY, lastOffset.getZMapped());
+                offsets.set(offsets.size() - 1, newOffset);
+            } catch (Exception e) {}
+        }
+    }
 }
 
