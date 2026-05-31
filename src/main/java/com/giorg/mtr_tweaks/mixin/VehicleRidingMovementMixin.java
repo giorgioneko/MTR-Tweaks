@@ -163,4 +163,32 @@ public abstract class VehicleRidingMovementMixin {
             // Vivecraft class not found or API fundamentally changed — silently skip
         }
     }
+
+    /**
+     * INJECT at HEAD of startRiding to fix Vivecraft players not mounting lifts.
+     * MTR only checks the "doorway" box when deciding if you should mount the lift.
+     * If a VR player teleports past the doorway into the middle of the lift, they
+     * never mount it and therefore can't use the Lift Menu button.
+     * We add the lift's floor box to the list of acceptable boarding locations.
+     */
+    @Inject(
+        method = "startRiding(Lorg/mtr/libraries/it/unimi/dsi/fastutil/objects/ObjectArrayList;JJJIDDDD)V",
+        at = @At("HEAD"),
+        remap = false
+    )
+    private static void mtrTweaks_startRidingLiftFix(
+            org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList<org.mtr.mapping.holder.Box> openFloorsAndDoorways,
+            long depotId, long sidingId, long vehicleId, int carNumber,
+            double x, double y, double z, double yaw,
+            CallbackInfo ci) {
+        org.mtr.core.data.Lift lift = org.mtr.mod.client.MinecraftClientData.getLift(vehicleId);
+        if (lift != null) {
+            org.mtr.mapping.holder.Box floor = new org.mtr.mapping.holder.Box(
+                -lift.getWidth() / 2.0 + 0.25, 0.0, -lift.getDepth() / 2.0 + 0.25,
+                lift.getWidth() / 2.0 - 0.25, 0.0, lift.getDepth() / 2.0 - 0.25
+            );
+            openFloorsAndDoorways.add(floor);
+        }
+    }
 }
+
