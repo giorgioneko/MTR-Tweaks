@@ -190,5 +190,32 @@ public abstract class VehicleRidingMovementMixin {
             openFloorsAndDoorways.add(floor);
         }
     }
+
+    private static long mtrTweaks_lastRidingId = 0L;
+
+    /**
+     * DEBUG: Print to actionbar and console if the player's riding state changes.
+     */
+    @Inject(method = "tick", at = @At("HEAD"), remap = false)
+    private static void mtrTweaks_debugTick(CallbackInfo ci) {
+        if (!VIVECRAFT_PRESENT) return;
+        try {
+            java.lang.reflect.Field field = org.mtr.mod.client.VehicleRidingMovement.class.getDeclaredField("ridingVehicleId");
+            field.setAccessible(true);
+            long id = (Long) field.get(null);
+            
+            if (id != mtrTweaks_lastRidingId) {
+                System.out.println("[MTR-Tweaks] RIDING STATE CHANGED! Old ID: " + mtrTweaks_lastRidingId + ", New ID: " + id);
+                mtrTweaks_lastRidingId = id;
+            }
+
+            if (id != 0L) {
+                LocalPlayer player = Minecraft.getInstance().player;
+                if (player != null) {
+                    player.displayClientMessage(net.minecraft.network.chat.Component.literal("§a[MTR-Tweaks] Currently Riding Vehicle ID: " + id), true);
+                }
+            }
+        } catch (Exception e) {}
+    }
 }
 
