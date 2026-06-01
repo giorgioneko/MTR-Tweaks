@@ -1,248 +1,114 @@
 package com.giorg.mtr_tweaks.mixin;
 
-import net.minecraft.client.Minecraft;
-import net.minecraft.client.player.LocalPlayer;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import org.mtr.mod.client.VehicleRidingMovement;
+import org.mtr.mod.render.PositionAndRotation;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
+@Mixin(value = VehicleRidingMovement.class, remap = false)
+public class VehicleRidingMovementMixin {
 
-/**
- * MTR-Tweaks: Vivecraft Compatibility Fix
- *
- * ROOT CAUSE — original bug:
- * MTR moves the player on trains/elevators by calling clientPlayerEntity.updatePosition(x,y,z)
- * every tick (line 306). CRITICALLY, MTR also calls InitClient.scheduleMovePlayer(runnable)
- * (line 310) which repeats that same position update on the *next render frame*. This "double
- * update" is intentional — it fights against vanilla gravity which would otherwise pull the
- * player 0.08 blocks downward between ticks, causing the player to slowly sink below the train.
- *
- * Our first mixin version wrongly cancelled this entire call, which:
- *   a) Lost the scheduled second update → player sank below the train each frame
- *   b) Lost Vivecraft room-origin tracking → VR camera stayed at ground level while
- *      the entity moved up to the train floor
- *
- * THE CORRECT FIX:
- * We do NOT cancel MTR's call. We let it run fully (both the immediate and scheduled update).
- * We inject at RETURN and, if Vivecraft is installed, we additionally try to reset Vivecraft's
- * VR room origin so the VR camera follows the entity to the train floor.
- *
- * This works for ALL Vivecraft locomotion modes because in all modes Vivecraft anchors the
- * VR room to the entity position when a "teleport/reset" event is signalled.
- */
-@Mixin(value = org.mtr.mod.client.VehicleRidingMovement.class, remap = false)
-public abstract class VehicleRidingMovementMixin {
-
-    // Detect Vivecraft once at class-load time
-    private static final boolean VIVECRAFT_PRESENT = isVivecraftPresent();
-
-    private static boolean isVivecraftPresent() {
-        try {
-            Class.forName("org.vivecraft.client_vr.ClientDataHolderVR");
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
-        }
-    }
-
-    // Track player Y before MTR moves them, so we can detect a height jump
-    private static double mtrTweaks_preY = Double.NaN;
-
-    /**
-     * INJECT at HEAD (no cancel) — record the player's Y before MTR teleports them.
-     * This lets us detect when MTR does a significant vertical move (boarding a train,
-     * elevator arriving at a floor, etc.) and tell Vivecraft to re-anchor.
-     */
-    @Inject(
-        method = "movePlayer(DDD)V",
+    @ModifyVariable(
+        method = "movePlayer(JJILorg/mtr/libraries/it/unimi/dsi/fastutil/objects/ObjectArrayList;Lorg/mtr/mod/client/GangwayMovementPositions;Lorg/mtr/mod/client/GangwayMovementPositions;Lorg/mtr/mod/client/GangwayMovementPositions;Lorg/mtr/mod/render/PositionAndRotation;)V",
         at = @At("HEAD"),
+        argsOnly = true,
         remap = false
     )
-    private static void mtrTweaks_preMovePlayer(double x, double y, double z, CallbackInfo ci) {
-        if (!VIVECRAFT_PRESENT) return;
-        LocalPlayer player = Minecraft.getInstance().player;
-        if (player != null) {
-            mtrTweaks_preY = player.getY();
+    private static PositionAndRotation mtrTweaks_modifyPositionAndRotation(
+            PositionAndRotation positionAndRotation,
+            long millisElapsed,
+            long vehicleId,
+            int carNumber
+    ) {
+        if (positionAndRotation == null) {
+            return null;
         }
-    }
 
-    /**
-     * INJECT at RETURN — after MTR has fully applied its position update (including setting
-     * up the scheduled double-update), check if a vertical jump happened and if so, tell
-     * Vivecraft to reset its VR room origin so the camera follows the entity.
-     *
-     * We try several known Vivecraft API entry points via reflection, ordered from most
-     * reliable to least, so this works across different Vivecraft builds.
-     */
-    @Inject(
-        method = "movePlayer(DDD)V",
-        at = @At("RETURN"),
-        remap = false
-    )
-    private static void mtrTweaks_postMovePlayer(double x, double y, double z, CallbackInfo ci) {
-        if (!VIVECRAFT_PRESENT) return;
-        if (Double.isNaN(mtrTweaks_preY)) return;
-
-        LocalPlayer player = Minecraft.getInstance().player;
-        if (player == null) return;
-
-        // Only trigger a Vivecraft room-origin reset when the Y changed noticeably.
-        // Small sub-block adjustments (the train floor undulation) don't need it.
-        // Large jumps (boarding a train or elevator changing floors) do.
-        double deltaY = Math.abs(player.getY() - mtrTweaks_preY);
-        if (deltaY < 0.25) return;
-
-        mtrTweaks_resetVivecraftRoomOrigin();
-    }
-
-    /**
-     * Attempt to signal Vivecraft that the player was "teleported" and its room origin
-     * should be re-anchored to the entity position.
-     *
-     * We try multiple reflection strategies because Vivecraft's internal API varies
-     * between versions.
-     */
-    private static void mtrTweaks_resetVivecraftRoomOrigin() {
+        // Find the vehicle with matching vehicleId
+        org.mtr.mod.data.VehicleExtension vehicle = null;
         try {
-            Class<?> dh = Class.forName("org.vivecraft.client_vr.ClientDataHolderVR");
-
-            // Strategy 1: getInstance() method
-            Object holder = null;
-            try {
-                Method getInstance = dh.getMethod("getInstance");
-                holder = getInstance.invoke(null);
-            } catch (Exception e) {
-                // Try static field instead
-                try {
-                    Field f = dh.getDeclaredField("INSTANCE");
-                    f.setAccessible(true);
-                    holder = f.get(null);
-                } catch (Exception ignored) {}
-            }
-
-            if (holder == null) return;
-
-            // Strategy 2: Try setting a "teleported" or "forceRecenter" boolean flag
-            for (String fieldName : new String[]{
-                "teleported", "vehicleTeleported", "forceRecenter",
-                "resetSeated", "resetOrigin", "teleportedLastTick"
-            }) {
-                try {
-                    Field f = dh.getDeclaredField(fieldName);
-                    f.setAccessible(true);
-                    if (f.getType() == boolean.class || f.getType() == Boolean.class) {
-                        f.set(holder, true);
-                        return; // Success
-                    }
-                } catch (NoSuchFieldException ignored) {}
-            }
-
-            // Strategy 3: Try calling a reset/recenter method on VRPlayer
-            for (String fieldName : new String[]{"vrPlayer", "vr_player", "player"}) {
-                try {
-                    Field vrPlayerField = dh.getDeclaredField(fieldName);
-                    vrPlayerField.setAccessible(true);
-                    Object vrPlayer = vrPlayerField.get(holder);
-                    if (vrPlayer == null) continue;
-
-                    for (String methodName : new String[]{"reset", "recenter", "resetOrigin", "resetRoomOrigin"}) {
-                        try {
-                            Method m = vrPlayer.getClass().getDeclaredMethod(methodName);
-                            m.setAccessible(true);
-                            m.invoke(vrPlayer);
-                            return; // Success
-                        } catch (Exception ignored) {}
-                    }
-                } catch (NoSuchFieldException ignored) {}
-            }
-
-        } catch (Exception e) {
-            // Vivecraft class not found or API fundamentally changed — silently skip
-        }
-    }
-
-    /**
-     * INJECT at HEAD of startRiding to fix Vivecraft players not mounting lifts.
-     * MTR only checks the "doorway" box when deciding if you should mount the lift.
-     * If a VR player teleports past the doorway into the middle of the lift, they
-     * never mount it and therefore can't use the Lift Menu button.
-     * We add the lift's floor box to the list of acceptable boarding locations.
-     */
-    @Inject(
-        method = "startRiding(Lorg/mtr/libraries/it/unimi/dsi/fastutil/objects/ObjectArrayList;JJJIDDDD)V",
-        at = @At("HEAD"),
-        remap = false
-    )
-    private static void mtrTweaks_startRidingLiftFix(
-            org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList<org.mtr.mapping.holder.Box> openFloorsAndDoorways,
-            long depotId, long sidingId, long vehicleId, int carNumber,
-            double x, double y, double z, double yaw,
-            CallbackInfo ci) {
-        org.mtr.core.data.Lift lift = org.mtr.mod.client.MinecraftClientData.getLift(vehicleId);
-        if (lift != null) {
-            org.mtr.mapping.holder.Box floor = new org.mtr.mapping.holder.Box(
-                -lift.getWidth() / 2.0 + 0.25, 0.0, -lift.getDepth() / 2.0 + 0.25,
-                lift.getWidth() / 2.0 - 0.25, 0.0, lift.getDepth() / 2.0 - 0.25
-            );
-            openFloorsAndDoorways.add(floor);
-        }
-    }
-
-    private static long mtrTweaks_lastRidingId = 0L;
-
-    /**
-     * DEBUG: Print to actionbar and console if the player's riding state changes.
-     */
-    @Inject(method = "tick", at = @At("HEAD"), remap = false)
-    private static void mtrTweaks_debugTick(CallbackInfo ci) {
-        if (!VIVECRAFT_PRESENT) return;
-        try {
-            java.lang.reflect.Field field = org.mtr.mod.client.VehicleRidingMovement.class.getDeclaredField("ridingVehicleId");
-            field.setAccessible(true);
-            long id = (Long) field.get(null);
-            
-            if (id != mtrTweaks_lastRidingId) {
-                System.out.println("[MTR-Tweaks] RIDING STATE CHANGED! Old ID: " + mtrTweaks_lastRidingId + ", New ID: " + id);
-                mtrTweaks_lastRidingId = id;
-            }
-
-            if (id != 0L) {
-                LocalPlayer player = Minecraft.getInstance().player;
-                if (player != null) {
-                    player.displayClientMessage(net.minecraft.network.chat.Component.literal("§a[MTR-Tweaks] Currently Riding Vehicle ID: " + id), true);
+            for (org.mtr.mod.data.VehicleExtension v : org.mtr.mod.client.MinecraftClientData.getInstance().vehicles) {
+                if (v.getId() == vehicleId) {
+                    vehicle = v;
+                    break;
                 }
             }
-        } catch (Exception e) {}
-    }
-
-    /**
-     * MTR forces the player's Y position to match the floor's exact Y level (usually 0.0).
-     * In Vivecraft, the entity's Y position represents the HMD (head). Forcing it to 0.0 crushes the player into the floor.
-     * We intercept clampPosition to preserve the player's true relative Y coordinate instead of the floor's Y.
-     */
-    @Inject(method = "clampPosition", at = @At("TAIL"), remap = false)
-    private static void mtrTweaks_clampPositionFix(
-            org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList floorsAndDoorways,
-            double x, double z,
-            org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList offsets,
-            CallbackInfo ci) {
-        if (!VIVECRAFT_PRESENT) return;
-        if (!offsets.isEmpty()) {
-            try {
-                java.lang.reflect.Field field = org.mtr.mod.client.VehicleRidingMovement.class.getDeclaredField("ridingVehicleY");
-                field.setAccessible(true);
-                double currentY = (Double) field.get(null);
-                
-                org.mtr.mapping.holder.Vector3d lastOffset = (org.mtr.mapping.holder.Vector3d) offsets.get(offsets.size() - 1);
-                
-                // Replace the floor's Y offset (0.0) with the player's actual HMD Y offset
-                org.mtr.mapping.holder.Vector3d newOffset = new org.mtr.mapping.holder.Vector3d(lastOffset.getXMapped(), currentY, lastOffset.getZMapped());
-                offsets.set(offsets.size() - 1, newOffset);
-            } catch (Exception e) {}
+        } catch (Exception e) {
+            // Ignore
         }
+
+        if (vehicle == null) {
+            return positionAndRotation;
+        }
+
+        // Verify if it is an AIRPLANE
+        if (vehicle.getTransportMode() != org.mtr.core.data.TransportMode.AIRPLANE) {
+            return positionAndRotation;
+        }
+
+        // Determine if climbing or descending and get the target pitch
+        try {
+            org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList<?> carsAndPositions = vehicle.getVehicleCarsAndPositions();
+            if (carNumber < carsAndPositions.size()) {
+                org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectObjectImmutablePair<?, ?> carData = 
+                    (org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectObjectImmutablePair<?, ?>) carsAndPositions.get(carNumber);
+                org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList<?> bogiesList = 
+                    (org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList<?>) carData.right();
+                
+                if (bogiesList != null && !bogiesList.isEmpty()) {
+                    org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectObjectImmutablePair<?, ?> bogiePair = 
+                        (org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectObjectImmutablePair<?, ?>) bogiesList.get(0);
+                    org.mtr.core.tool.Vector b1 = (org.mtr.core.tool.Vector) bogiePair.left();
+                    org.mtr.core.tool.Vector b2 = (org.mtr.core.tool.Vector) bogiePair.right();
+
+                    org.mtr.core.tool.Vector frontBogie = b1;
+                    org.mtr.core.tool.Vector rearBogie = b2;
+
+                    if (vehicle.getReversed()) {
+                        frontBogie = b2;
+                        rearBogie = b1;
+                    }
+
+                    double dy = frontBogie.y - rearBogie.y;
+
+                    String depotName = "";
+                    try {
+                        long depotId = vehicle.vehicleExtraData.getDepotId();
+                        org.mtr.core.data.Depot depot = org.mtr.mod.client.MinecraftClientData.getInstance().depotIdMap.get(depotId);
+                        if (depot != null) {
+                            depotName = depot.getName();
+                        }
+                    } catch (Exception e) {
+                        // Ignore
+                    }
+
+                    double targetPitch = 0.0;
+                    boolean apply = false;
+                    if (dy > 0.05) {
+                        targetPitch = com.giorg.mtr_tweaks.MTRTweaks.getClimbPitch(depotName);
+                        apply = true;
+                    } else if (dy < -0.05) {
+                        targetPitch = com.giorg.mtr_tweaks.MTRTweaks.getLandPitch(depotName);
+                        apply = true;
+                    }
+
+                    if (apply) {
+                        double targetPitchRadians = Math.toRadians(targetPitch);
+
+                        return new PositionAndRotation(
+                            positionAndRotation.position,
+                            positionAndRotation.yaw,
+                            targetPitchRadians
+                        );
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Ignore
+        }
+
+        return positionAndRotation;
     }
 }
-

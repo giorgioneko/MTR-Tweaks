@@ -5,6 +5,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.common.Mod;
 import org.apache.logging.log4j.LogManager;
@@ -16,13 +17,17 @@ import org.mtr.mod.InitClient;
 import org.mtr.mod.block.BlockNode;
 import org.mtr.mod.client.MinecraftClientData;
 import org.mtr.mod.packet.PacketRequestData;
+import com.mojang.brigadier.CommandDispatcher;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.Commands;
+import com.mojang.brigadier.arguments.FloatArgumentType;
 
 /**
  * MTR-Tweaks
  *
  * Current fixes (without touching the main MTR mod):
- * 1. Vivecraft Compatibility  — VehicleRidingMovementMixin.java
- * 2. Missing Track Auto-Resync — handled here via a Forge ClientTickEvent
+ * 1. Missing Track Auto-Resync — handled here via a Forge ClientTickEvent
+ * 2. Plane Pitch Controller — configure plane pitch rendering during climbing/landing
  */
 @Mod("mtr_tweaks")
 public class MTRTweaks {
@@ -34,25 +39,82 @@ public class MTRTweaks {
 
     private int resyncCooldown = 0;
 
+    // Configurable plane pitches per depot
+    public static class PitchSettings {
+        public float climb = 15f;
+        public float land = -10f;
+
+        public PitchSettings(float climb, float land) {
+            this.climb = climb;
+            this.land = land;
+        }
+    }
+
+    public static final java.util.Map<String, PitchSettings> depotPitches = new java.util.HashMap<>();
+    private static final java.io.File CONFIG_FILE = new java.io.File("config/mtr_tweaks_plane_pitch.json");
+
     public MTRTweaks() {
         // Register ourselves for Forge events so our @SubscribeEvent methods are called
         MinecraftForge.EVENT_BUS.register(this);
-        LOGGER.info("MTR-Tweaks loaded! Vivecraft fix + Track resync active.");
+        loadConfig();
+        LOGGER.info("MTR-Tweaks loaded! Track resync + Plane pitch active.");
+    }
+
+    public static void loadConfig() {
+        depotPitches.clear();
+        if (CONFIG_FILE.exists()) {
+            try (java.io.FileReader reader = new java.io.FileReader(CONFIG_FILE)) {
+                com.google.gson.JsonObject json = com.google.gson.JsonParser.parseReader(reader).getAsJsonObject();
+                if (json.has("depots")) {
+                    com.google.gson.JsonObject depotsJson = json.getAsJsonObject("depots");
+                    for (java.util.Map.Entry<String, com.google.gson.JsonElement> entry : depotsJson.entrySet()) {
+                        String name = entry.getKey();
+                        com.google.gson.JsonObject settingsObj = entry.getValue().getAsJsonObject();
+                        float climb = settingsObj.has("climb") ? settingsObj.get("climb").getAsFloat() : 15f;
+                        float land = settingsObj.has("land") ? settingsObj.get("land").getAsFloat() : -10f;
+                        depotPitches.put(name, new PitchSettings(climb, land));
+                    }
+                }
+            } catch (Exception e) {
+                LOGGER.error("Failed to load config", e);
+            }
+        }
+    }
+
+    public static void saveConfig() {
+        try {
+            CONFIG_FILE.getParentFile().mkdirs();
+            try (java.io.FileWriter writer = new java.io.FileWriter(CONFIG_FILE)) {
+                com.google.gson.JsonObject json = new com.google.gson.JsonObject();
+                com.google.gson.JsonObject depotsJson = new com.google.gson.JsonObject();
+                for (java.util.Map.Entry<String, PitchSettings> entry : depotPitches.entrySet()) {
+                    com.google.gson.JsonObject settingsObj = new com.google.gson.JsonObject();
+                    settingsObj.addProperty("climb", entry.getValue().climb);
+                    settingsObj.addProperty("land", entry.getValue().land);
+                    depotsJson.add(entry.getKey(), settingsObj);
+                }
+                json.add("depots", depotsJson);
+                new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(json, writer);
+            }
+        } catch (Exception e) {
+            LOGGER.error("Failed to save config", e);
+        }
+    }
+
+    public static float getClimbPitch(String depotName) {
+        if (depotName == null || depotName.isEmpty()) return 15f;
+        PitchSettings settings = depotPitches.get(depotName);
+        return settings != null ? settings.climb : 15f;
+    }
+
+    public static float getLandPitch(String depotName) {
+        if (depotName == null || depotName.isEmpty()) return -10f;
+        PitchSettings settings = depotPitches.get(depotName);
+        return settings != null ? settings.land : -10f;
     }
 
     /**
      * Track Resync Fix — runs every client tick.
-     *
-     * ROOT CAUSE:
-     * MTR tracks are stored as Rail objects. The server syncs rail "nodes" (the endpoint blocks)
-     * and "connections" (the actual Rail data) separately. Due to chunk loading timing, sometimes
-     * the BlockNode blocks arrive at the client but the Rail connection data does not.
-     * The client silently skips rendering the rail, leaving invisible tracks.
-     *
-     * THE FIX:
-     * Every ~5 seconds, scan a radius around the player for BlockNode blocks that exist in the
-     * world but have no corresponding entry in MinecraftClientData.positionsToRail. If orphaned
-     * nodes are found, send a DataRequest to the server to push the missing rail data again.
      */
     @SubscribeEvent
     public void onClientTick(TickEvent.ClientTickEvent event) {
@@ -67,13 +129,15 @@ public class MTRTweaks {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.player == null || minecraft.level == null) return;
 
+        // Enforce the 5-second interval immediately so we do not scan every tick when no orphans are found
+        resyncCooldown = RESYNC_INTERVAL_TICKS;
+
         BlockPos playerPos = minecraft.player.blockPosition();
         MinecraftClientData clientData = MinecraftClientData.getInstance();
 
         boolean foundOrphan = false;
 
         // Scan the area around the player for orphaned node blocks.
-        // Step by 4 to keep the scan cheap (we don't need to check every single block).
         outerLoop:
         for (int dx = -SCAN_RADIUS; dx <= SCAN_RADIUS; dx += 4) {
             for (int dy = -32; dy <= 32; dy += 4) {
@@ -109,7 +173,6 @@ public class MTRTweaks {
         if (foundOrphan) {
             try {
                 // Build a data request centered on the player with our scan radius.
-                // The server will respond with all rail data for that area.
                 org.mtr.mapping.holder.BlockPos mtrPlayerPos = Init.newBlockPos(
                     playerPos.getX(), playerPos.getY(), playerPos.getZ()
                 );
@@ -123,11 +186,11 @@ public class MTRTweaks {
                 InitClient.REGISTRY_CLIENT.sendPacketToServer(new PacketRequestData(dataRequest));
                 LOGGER.debug("MTR-Tweaks: Requested track data resync (found orphaned node blocks)");
             } catch (Exception e) {
-                // DataRequest API changed between MTR versions — log and skip gracefully
+                // DataRequest API changed between MTR versions
                 LOGGER.debug("MTR-Tweaks: Track resync skipped (DataRequest API mismatch): " + e.getMessage());
             }
 
-            // Cooldown regardless of success/failure — don't hammer the server
+            // Cooldown regardless of success/failure
             resyncCooldown = RESYNC_INTERVAL_TICKS;
         }
     }
