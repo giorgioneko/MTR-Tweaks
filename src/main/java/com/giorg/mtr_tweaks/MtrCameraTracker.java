@@ -1,4 +1,4 @@
-package com.giorg.mtr_tweaks.mixin;
+package com.giorg.mtr_tweaks;
 
 public class MtrCameraTracker {
     public static double cachedVehiclePitch = 0.0;

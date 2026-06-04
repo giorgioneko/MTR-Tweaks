@@ -6,6 +6,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.mtr.mod.client.VehicleRidingMovement;
 import org.mtr.mod.render.PositionAndRotation;
+import com.giorg.mtr_tweaks.MtrCameraTracker;
 
 @Mixin(value = VehicleRidingMovement.class, remap = false)
 public class VehicleRidingMovementMixin {
