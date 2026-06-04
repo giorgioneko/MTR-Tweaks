@@ -134,3 +134,8 @@ tasks.withType(JavaCompile).configureEach {
 tasks.named('downloadMCMeta').configure {
     doNotTrackState("Fix for Gradle 8.8")
 }
+
+
+mixin {
+    add sourceSets.main, "mtr_tweaks.refmap.json"
+}
