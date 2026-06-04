@@ -97,11 +97,15 @@ public class VehicleRidingMovementMixin {
                     if (apply) {
                         double targetPitchRadians = Math.toRadians(targetPitch);
 
-                        return new PositionAndRotation(
+                        PositionAndRotation newPos = new PositionAndRotation(
                             positionAndRotation.position,
                             positionAndRotation.yaw,
                             targetPitchRadians
                         );
+                        MtrCameraTracker.cachedVehiclePitch = newPos.pitch;
+                        MtrCameraTracker.cachedVehicleYaw = newPos.yaw;
+                        MtrCameraTracker.lastRidingTick = System.currentTimeMillis();
+                        return newPos;
                     }
                 }
             }
@@ -109,6 +113,9 @@ public class VehicleRidingMovementMixin {
             // Ignore
         }
 
+        MtrCameraTracker.cachedVehiclePitch = positionAndRotation.pitch;
+        MtrCameraTracker.cachedVehicleYaw = positionAndRotation.yaw;
+        MtrCameraTracker.lastRidingTick = System.currentTimeMillis();
         return positionAndRotation;
     }
 }
