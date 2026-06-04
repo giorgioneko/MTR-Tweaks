@@ -72,7 +72,10 @@ public class VehicleRidingMovementMixin {
                         rearBogie = b1;
                     }
 
+                    double dx = frontBogie.x - rearBogie.x;
                     double dy = frontBogie.y - rearBogie.y;
+                    double dz = frontBogie.z - rearBogie.z;
+                    double horizontalDist = Math.sqrt(dx * dx + dz * dz);
 
                     String depotName = "";
                     try {
@@ -85,28 +88,82 @@ public class VehicleRidingMovementMixin {
                         // Ignore
                     }
 
-                    double targetPitch = 0.0;
-                    boolean apply = false;
-                    if (dy > 0.05) {
-                        targetPitch = com.giorg.mtr_tweaks.MTRTweaks.getClimbPitch(depotName);
-                        apply = true;
-                    } else if (dy < -0.05) {
-                        targetPitch = com.giorg.mtr_tweaks.MTRTweaks.getLandPitch(depotName);
-                        apply = true;
+                    if (depotName == null || depotName.isEmpty()) {
+                        try {
+                            java.lang.reflect.Field sidingField = org.mtr.core.data.Vehicle.class.getDeclaredField("siding");
+                            sidingField.setAccessible(true);
+                            org.mtr.core.data.Siding siding = (org.mtr.core.data.Siding) sidingField.get(vehicle);
+                            if (siding != null) {
+                                depotName = siding.getDepotName();
+                            }
+                        } catch (Exception e) {
+                            // Ignore
+                        }
                     }
 
-                    if (apply) {
-                        double targetPitchRadians = Math.toRadians(targetPitch);
+                    double targetPitch = 0.0;
+                    double extraPitch = 0.0;
+                    boolean apply = false;
 
-                        PositionAndRotation newPos = new PositionAndRotation(
-                            positionAndRotation.position,
-                            positionAndRotation.yaw,
-                            targetPitchRadians
-                        );
-                        MtrCameraTracker.cachedVehiclePitch = newPos.pitch;
-                        MtrCameraTracker.cachedVehicleYaw = newPos.yaw;
-                        MtrCameraTracker.lastRidingTick = System.currentTimeMillis();
-                        return newPos;
+                    if (horizontalDist > 0.1) {
+                        double currentSlopePitchDegrees = Math.toDegrees(Math.atan2(dy, horizontalDist));
+
+                        if (dy > 0.05) {
+                            targetPitch = com.giorg.mtr_tweaks.MTRTweaks.getClimbPitch(depotName);
+                            extraPitch = -(targetPitch - currentSlopePitchDegrees);
+                            apply = true;
+                        } else if (dy < -0.05) {
+                            targetPitch = com.giorg.mtr_tweaks.MTRTweaks.getLandPitch(depotName);
+                            extraPitch = -(targetPitch - currentSlopePitchDegrees);
+                            apply = true;
+                        }
+
+                        if (apply && Math.abs(extraPitch) > 0.01) {
+                            double theta = Math.toRadians(extraPitch);
+                            
+                            double pivotX = (frontBogie.x + rearBogie.x) / 2.0;
+                            double pivotY = (frontBogie.y + rearBogie.y) / 2.0;
+                            double pivotZ = (frontBogie.z + rearBogie.z) / 2.0;
+                            
+                            double ux = dx / horizontalDist;
+                            double uz = dz / horizontalDist;
+                            
+                            org.mtr.core.tool.Vector p = positionAndRotation.position;
+                            double dxP = p.x - pivotX;
+                            double dyP = p.y - pivotY;
+                            double dzP = p.z - pivotZ;
+                            
+                            double localZ = dxP * ux + dzP * uz;
+                            double localY = dyP;
+                            
+                            double newLocalY = localY * Math.cos(theta) - localZ * Math.sin(theta);
+                            double newLocalZ = localY * Math.sin(theta) + localZ * Math.cos(theta);
+                            
+                            double deltaY = newLocalY - localY;
+                            double deltaZ = newLocalZ - localZ;
+                            
+                            double shiftX = deltaZ * ux;
+                            double shiftY = deltaY;
+                            double shiftZ = deltaZ * uz;
+                            
+                            org.mtr.core.tool.Vector shiftedPosition = new org.mtr.core.tool.Vector(
+                                p.x + shiftX,
+                                p.y + shiftY,
+                                p.z + shiftZ
+                            );
+
+                            double targetPitchRadians = Math.toRadians(targetPitch);
+
+                            PositionAndRotation newPos = new PositionAndRotation(
+                                shiftedPosition,
+                                positionAndRotation.yaw,
+                                targetPitchRadians
+                            );
+                            MtrCameraTracker.cachedVehiclePitch = newPos.pitch;
+                            MtrCameraTracker.cachedVehicleYaw = newPos.yaw;
+                            MtrCameraTracker.lastRidingTick = System.currentTimeMillis();
+                            return newPos;
+                        }
                     }
                 }
             }
